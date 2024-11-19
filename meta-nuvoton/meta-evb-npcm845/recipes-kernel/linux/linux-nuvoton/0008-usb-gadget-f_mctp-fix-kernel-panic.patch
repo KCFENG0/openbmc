@@ -1,0 +1,53 @@
+From ac233af9758909c6fde6f40db2a8e11a2e3cac89 Mon Sep 17 00:00:00 2001
+From: Stanley Chu <yschu@nuvoton.com>
+Date: Tue, 19 Nov 2024 11:31:30 +0800
+Subject: [PATCH] usb: gadget: f_mctp: fix kernel panic
+
+Signed-off-by: Stanley Chu <yschu@nuvoton.com>
+---
+ drivers/usb/gadget/function/f_mctp.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/usb/gadget/function/f_mctp.c b/drivers/usb/gadget/function/f_mctp.c
+index e8ca76c42cc4..b426c108fac8 100644
+--- a/drivers/usb/gadget/function/f_mctp.c
++++ b/drivers/usb/gadget/function/f_mctp.c
+@@ -198,7 +198,6 @@ static void mctp_usbg_prealloc(struct f_mctp *mctp)
+ 	 */
+ 	spin_lock_irqsave(&mctp->lock, flags);
+ 	list_replace_init(&mctp->rx_reqs, &reqs);
+-	spin_unlock_irqrestore(&mctp->lock, flags);
+ 
+ 	list_for_each_entry(req, &reqs, list) {
+ 		skb = __netdev_alloc_skb(mctp->dev, MCTP_USB_XFER_SIZE,
+@@ -210,6 +209,7 @@ static void mctp_usbg_prealloc(struct f_mctp *mctp)
+ 		req->context = skb;
+ 		usb_ep_queue(mctp->out_ep, req, GFP_KERNEL);
+ 	}
++	spin_unlock_irqrestore(&mctp->lock, flags);
+ 
+ 	/* next, allocate our pool of spare skbs */
+ 	n_skb = skb_queue_len_lockless(&mctp->skb_free_list);
+@@ -257,15 +257,15 @@ static int __mctp_usbg_tx(struct f_mctp *mctp, struct sk_buff *skb)
+ 	struct usb_request *req;
+ 
+ 	req = list_first_entry_or_null(&mctp->tx_reqs, struct usb_request, list);
++	if (!req) {
++		netdev_err(dev, "no tx reqs available!\n");
++		return -1;
++	}
+ 	if (req)
+ 		list_del(&req->list);
+ 	if (list_empty(&req->list))
+ 		netif_stop_queue(dev);
+ 
+-	if (!req) {
+-		netdev_err(dev, "no tx reqs available!\n");
+-		return -1;
+-	}
+ 
+ 	req->context = skb;
+ 	req->buf = skb->data;
+-- 
+2.34.1
+

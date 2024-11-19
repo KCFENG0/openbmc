@@ -45,4 +45,5 @@ SRC_URI:append:evb-npcm845 = " file://0004-usb-gadget-mctp-defer-tx-to-batch.pat
 SRC_URI:append:evb-npcm845 = " file://0005-driver-usb-f_mctp-add-high-speed-support.patch"
 SRC_URI:append:evb-npcm845 = " file://0006-driver-mctp-usb-fix-rx-issue.patch"
 SRC_URI:append:evb-npcm845 = " file://0007-driver-mctp-usb-set-max-mtu-to-255.patch"
+SRC_URI:append:evb-npcm845 = " file://0008-usb-gadget-f_mctp-fix-kernel-panic.patch"
 SRC_URI:append:evb-npcm845 = " file://0001-driver-soc-nuvoton-add-espi-slave-driver.patch"
