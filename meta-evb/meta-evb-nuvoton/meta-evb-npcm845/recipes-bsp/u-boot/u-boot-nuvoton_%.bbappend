@@ -14,4 +14,3 @@ SRC_URI:append:evb-npcm845 = " file://0002-Enable-openbmc-copy-base-file-to-ram-
 SRC_URI:append:evb-npcm845 = " file://0001-uart2-clock-source-to-24Mhz.patch"
 SRC_URI:append:evb-npcm845 = " file://0003-uboot-add-espi-master-emulator.patch"
 SRC_URI:append:evb-npcm845 = " file://0004-dts-pinctrl-remove-gspi.patch"
-SRC_URI:append:evb-npcm845 = " file://0005-cmd-espi-add-uart-cmd-test.patch"

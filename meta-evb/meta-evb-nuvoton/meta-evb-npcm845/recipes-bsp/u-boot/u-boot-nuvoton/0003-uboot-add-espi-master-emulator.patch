@@ -1,16 +1,17 @@
-From ad667f49f2f5caf8801e1ff99049cfe59cf9b962 Mon Sep 17 00:00:00 2001
+From 1850d220357037715082aa502d36e2a38c0892dd Mon Sep 17 00:00:00 2001
 From: Stanley Chu <yschu@nuvoton.com>
 Date: Mon, 9 Sep 2024 11:12:35 +0800
 Subject: [PATCH] uboot: add espi master emulator
 
 Signed-off-by: Stanley Chu <yschu@nuvoton.com>
+Signed-off-by: Joseph Liu <kwliu@nuvoton.com>
 ---
  arch/arm/dts/nuvoton-npcm845-evb.dts     |    4 +
  arch/arm/dts/nuvoton-npcm845-pincfg.dtsi |   45 +
  cmd/Kconfig                              |    5 +
  cmd/Makefile                             |    1 +
- cmd/espi.c                               | 1151 ++++++++++++++++++++++
- 5 files changed, 1206 insertions(+)
+ cmd/espi.c                               | 1482 ++++++++++++++++++++++
+ 5 files changed, 1537 insertions(+)
  create mode 100644 cmd/espi.c
 
 diff --git a/arch/arm/dts/nuvoton-npcm845-evb.dts b/arch/arm/dts/nuvoton-npcm845-evb.dts
@@ -113,13 +114,14 @@ index afb8c5f61c..6a6b0cf9b8 100644
  obj-$(CONFIG_CMD_EXT2) += ext2.o
 diff --git a/cmd/espi.c b/cmd/espi.c
 new file mode 100644
-index 0000000000..68ca6104f4
+index 0000000000..82afb762ca
 --- /dev/null
 +++ b/cmd/espi.c
-@@ -0,0 +1,1151 @@
+@@ -0,0 +1,1482 @@
 +#include <stdlib.h>
 +#include <command.h>
 +#include <common.h>
++#include <time.h>
 +#include <dm.h>
 +#include <rand.h>
 +#include <asm/io.h>
@@ -142,11 +144,16 @@ index 0000000000..68ca6104f4
 +#define PORT_IN		(PORT_BASE + 0x4)
 +#define PORT_OES	(PORT_BASE + 0x70)
 +#define PORT_IEM	(PORT_BASE + 0x58)
++#define PORT_EVEN	(PORT_BASE + 0x40)
++#define PORT_EVENS	(PORT_BASE + 0x44)
++#define PORT_EVENC	(PORT_BASE + 0x48)
++#define PORT_EVST	(PORT_BASE + 0x4C)
 +#define eSPI_nCS	BIT(1) //161
 +#define eSPI_CLK	BIT(3) //163
 +#define eSPI_IO0	BIT(4) //164
 +#define eSPI_IO1	BIT(5) //165
 +#define eSPI_nRST	BIT(6) //166
++#define eSPI_ALERT	BIT(8) //168
 +
 +// eSPI command
 +#define CMD_SET_CONFIGURATION	0x22
@@ -155,6 +162,11 @@ index 0000000000..68ca6104f4
 +#define CMD_GET_VWIRE		0x05
 +#define CMD_GET_GET_STATUS	0x25
 +#define CMD_RESET		0xFF
++
++// Flash Channel Commands
++#define	CMD_PUT_FLASH_NP 0x0A
++#define	CMD_GET_FLASH_C	0xB
++#define CYCLE_FLASH_READ	0x00
 +
 +// Peripheral Channel Commands
 +#define CMD_PUT_PC		0x00
@@ -165,6 +177,7 @@ index 0000000000..68ca6104f4
 +#define CMD_PUT_IOWR_SHORT	0x44
 +
 +// eSPI response
++#define RESP_DEFER		0x01
 +#define RESP_ACCEPT		0x08
 +#define RESP_WAIT		0x0F
 +#define RESP_FATAL_ERROR	0x03
@@ -194,6 +207,30 @@ index 0000000000..68ca6104f4
 +#define KCS_CMD_WRITE_START	0x61
 +#define KCS_CMD_WRITE_END	0x62
 +#define KCS_CMD_READ		0x68
++
++struct get_flash_c_req {
++	u8 cmd;
++	u8 crc;
++};
++
++struct get_flash_c_resp {
++	u8 code;
++	u8 cycle_type;
++	u8 tag_len_11_8;
++	u8 len_7_0;
++	u8 data[67]; // 64 bytes data + 2 byte status; 1 byte crc
++} __attribute__((__packed__));
++
++struct get_status_req {
++	u8 cmd;
++	u8 crc;
++};
++
++struct get_status_resp {
++	u8 code;
++	u16 status;
++	u8 crc;
++} __attribute__((__packed__));
 +
 +struct get_configuration_req {
 +	u8 cmd;
@@ -290,6 +327,20 @@ index 0000000000..68ca6104f4
 +	u8 operation_supp;
 +} __attribute__((__packed__));
 +
++
++struct put_flash_np {
++	u8 cmd;
++	u8 cycle_type;
++	u8 tag_len_11_8;
++	u8 len_7_0;
++	u8 addr_31_24;
++	u8 addr_23_16;
++	u8 addr_15_8;
++	u8 addr_7_0;
++	u8 crc;
++} __attribute__((__packed__));
++
++
 +static u32 espi_port_state = 0;
 +static bool debug = false;
 +
@@ -327,7 +378,11 @@ index 0000000000..68ca6104f4
 +	// set output enable
 +	writel(eSPI_nCS | eSPI_CLK | eSPI_IO0 | eSPI_nRST, PORT_OES);
 +	// set input enable
-+	writel(eSPI_IO1, PORT_IEM);
++	writel(eSPI_IO1 | eSPI_ALERT, PORT_IEM);
++
++	// set event enable
++	writel(eSPI_ALERT, PORT_EVEN);
++	writel(eSPI_ALERT, PORT_EVENS);
 +
 +	printf("espi reset\n");
 +	udelay(100);
@@ -403,15 +458,15 @@ index 0000000000..68ca6104f4
 +
 +	do {
 +		*code = espi_recv_byte_single();
-+		if (*code != RESP_WAIT && *code != RESP_ACCEPT) {
++		if (*code != RESP_WAIT && *code != RESP_ACCEPT && *code != RESP_DEFER) {
 +			rc = -EIO;
 +			break;
 +		}
-+		if (count-- == 0 && *code != RESP_ACCEPT) {
++		if (count-- == 0 && *code != RESP_ACCEPT && *code != RESP_DEFER) {
 +			rc = -ETIMEDOUT;
 +			break;
 +		}
-+	} while (*code != RESP_ACCEPT);
++	} while (*code != RESP_ACCEPT && *code != RESP_DEFER);
 +
 +	return rc;
 +}
@@ -447,7 +502,7 @@ index 0000000000..68ca6104f4
 +/*
 +After the last bit of the Command Phase has been sent out on the data lines, the data
 +lines enter the Turn-Around window. The eSPI master is required to drive all the data
-+lines to logic ¿1¿ for the first clock of the Turn-Around window and tri-state the data
++lines to logic ï¿½1ï¿½for the first clock of the Turn-Around window and tri-state the data
 +lines thereafter. The number of clocks for the Turn-Around window is a fixed 2 serial
 + */
 +static void espi_tar(void)
@@ -457,6 +512,199 @@ index 0000000000..68ca6104f4
 +	espi_port_set(eSPI_CLK);
 +	espi_port_clear(eSPI_CLK);
 +}
++
++
++static u16 espi_get_status(void)
++{
++	struct get_status_req req = {0};
++	struct  get_status_resp resp = {0};
++
++	req.cmd = CMD_GET_GET_STATUS;
++	req.crc = crc8(0, (u8 *)&req, sizeof(req) - 1);
++
++	debug("req.cmd 0x%x\n", req.cmd );
++	debug("req.crc 0x%x\n", req.crc);
++
++
++	//CS_low, CLK_low, IO0
++	espi_port_update(eSPI_IO0, eSPI_nCS | eSPI_CLK);
++
++	espi_send((u8 *)&req, sizeof(req));
++	espi_tar();
++	respi_read_response((u8 *)&resp, sizeof(resp));
++	espi_port_set(eSPI_nCS);
++
++	debug("resp.code 0x%x\n", resp.code);
++	debug("resp.status 0x%x\n", resp.status);
++	debug("resp.crc %x\n", resp.crc);
++
++
++	return resp.status;
++}
++
++
++static u8 espi_get_flash_c(int len, u32 dest)
++{
++	struct get_flash_c_req req = {0};
++	struct  get_flash_c_resp resp = {0};
++	u8 *addr = (u8 *)dest;
++	int ret;
++	u16 status;
++
++	req.cmd = CMD_GET_FLASH_C;
++	req.crc = crc8(0, (u8 *)&req, sizeof(req) - 1);
++
++	debug("req.cmd 0x%x\n", req.cmd );
++	debug("req.crc 0x%x\n", req.crc);
++
++	//CS_low, CLK_low, IO0
++	espi_port_update(eSPI_IO0, eSPI_nCS | eSPI_CLK);
++	espi_send((u8 *)&req, sizeof(req));
++	espi_tar();
++	status = respi_read_response((u8 *)&resp, sizeof(resp) - (64 - len));
++	espi_port_set(eSPI_nCS);
++
++	debug("resp.code 0x%x\n", resp.code);
++	debug("resp.cycle_type 0x%x\n", resp.cycle_type);
++	debug("resp.status %x\n", resp.data[len] | (resp.data[len + 1] << 8));
++	debug("resp.crc %x\n", resp.data[len + 2]);
++
++	if (resp.cycle_type == 0xf)
++		memcpy(addr, resp.data, len);
++	else
++		printf("flash cycle type error\n");
++
++	if (status) {
++		printf("espi response error: code=0x%02x, status=0x%04x\n", resp.code, status);
++		return STATUS_ERR;
++	}
++
++	return STATUS_OK;
++}
++
++static int espi_put_flash_np(u32 addr, int count)
++{
++	struct put_flash_np req;
++	struct espi_common_resp resp;
++	u8 tag = 0;
++	u16 status;
++
++	req.cmd = CMD_PUT_FLASH_NP;
++	req.cycle_type = CYCLE_FLASH_READ;
++	req.tag_len_11_8 = (tag << 4) | ((count & 0xf00) >> 8);
++	req.len_7_0 =  count & 0xff;
++	req.addr_7_0= addr & 0xff;
++	req.addr_15_8 = (addr & 0x0000FF00) >> 8;
++	req.addr_23_16 = (addr & 0x00FF0000) >> 16;
++	req.addr_31_24 = (addr & 0xFF000000) >> 24;
++	req.crc = crc8(0, (u8 *)&req, sizeof(req) - 1);
++
++	debug("req.cmd 0x%x\n", req.cmd);
++	debug("req.cycle_type 0x%x\n", req.cycle_type);
++	debug("req.tag_len_11_8 0x%x\n", req.tag_len_11_8);
++	debug("req.len_7_0 0x%x\n", req.len_7_0);
++	debug("req.addr_7_0 0x%x\n", req.addr_7_0);
++	debug("req.addr_15_8 0x%x\n", req.addr_15_8);
++	debug("req.addr_23_16 0x%x\n", req.addr_23_16);
++	debug("req.addr_31_24 0x%x\n", req.addr_31_24);
++	debug("req.crc 0x%x\n", req.crc);
++
++	//CS_low, CLK_low, IO0
++	espi_port_update(eSPI_IO0, eSPI_nCS | eSPI_CLK);
++
++	espi_send((u8 *)&req, sizeof(req));
++	espi_tar();
++	status = respi_read_response((u8 *)&resp, sizeof(resp));
++	espi_port_set(eSPI_nCS);
++
++	debug("resp.code 0x%x\n", resp.code);
++	debug("resp.status 0x%x\n", resp.status);
++
++	if (status) {
++		printf("espi response error: code=0x%02x, status=0x%04x\n", resp.code, status);
++		return STATUS_ERR;
++	}
++
++	return STATUS_OK;
++}
++
++static int wait_alert(void)
++{
++	u32 val;
++	int count = 1000;
++
++	do {
++		val = readl(PORT_EVST);
++		if (val & eSPI_ALERT) {
++			writel(eSPI_ALERT, PORT_EVST);
++			debug("eSPI_ALERT\n");
++			break;
++		}
++		if (count-- == 0) {
++			printf("wait_alert timeout\n");
++			return -ETIMEDOUT;
++		}
++		udelay(10);
++	} while (1);
++
++	return 0;
++}
++
++static int espi_flash_read(u32 addr, int count, u32 dest)
++{
++	u16 status;
++	int i, index = 0, len;
++
++	static ulong time_start;
++
++	time_start = get_timer(0);
++
++	printf("Load address: 0x%x\n", dest);
++	puts("Loading: *\b");
++
++	index = count /64;
++	if (count % 64)
++		index++;
++
++	for (i = 0; i < index; i ++) {
++		if ((i == index - 1) && (count % 64))
++			len = count % 64;
++		else
++			len = 64;
++
++		if (espi_put_flash_np(addr + i * 64, len))
++			return STATUS_ERR;
++
++		if (wait_alert())
++			return STATUS_ERR;
++
++		status = espi_get_status();
++		if (status & BIT(12)) {
++			debug("FLASH_C_AVAIL\n");
++			if (espi_get_flash_c(len, dest + i * 64))
++				return STATUS_ERR;
++			putc('#');
++		} else {
++			printf("FLASH_C_NOT_AVAIL\n");
++			return STATUS_ERR;
++		}
++
++		if ((i % 64) == 0 && i > 0)
++			puts("\n\t ");
++	}
++
++
++	time_start = get_timer(time_start);
++	if (time_start > 0) {
++		puts("\n\t ");	/* Line up with "Loading: " */
++		print_size(count / time_start * 1000, "/s");
++	}
++
++	printf("\ndone\n");
++
++	return STATUS_OK;
++}
++
 +
 +static int espi_get_configuration(u16 addr, u8 *in)
 +{
@@ -592,7 +840,7 @@ index 0000000000..68ca6104f4
 +		printf("IO wr: addr(0x%x)=", addr);
 +		for (i = count - 1; i >= 0; i--)
 +			printf("%02x", data[i]);
-+		printf("\n");
++		printf("\n"); 
 +	}
 +
 +	req.cmd = CMD_PUT_IOWR_SHORT | ((count - 1) & 0x3);
@@ -896,7 +1144,7 @@ index 0000000000..68ca6104f4
 +	//struct get_vwire_resp *vwire_resp = (struct get_vwire_resp *)&resp[0];
 +	//u32 data;
 +	//int ret;
-+
++#if 1
 +	espi_set_configuration(0x20, 0x00000001, resp);
 +	espi_get_configuration(0x20, resp);
 +	if (config_resp->status & STATUS_VW_AVAIL)
@@ -916,6 +1164,8 @@ index 0000000000..68ca6104f4
 +	if (config_resp->status & STATUS_VW_AVAIL)
 +		espi_get_vwire(resp);
 +
++
++
 +	espi_set_configuration(0x10, 0x00001113, resp);
 +	/* wait peripheral channle ready */
 +	count = 10;
@@ -927,6 +1177,19 @@ index 0000000000..68ca6104f4
 +		}
 +		mdelay(1);
 +	}
++#endif
++
++	espi_set_configuration(0x40, 0x00031925, resp);
++	count = 10;
++	while (count-- > 0) {
++		espi_get_configuration(0x40, resp);
++		if (config_resp->data & BIT(1)) {
++			printf("flash channel ready\n");
++			break;
++		}
++		mdelay(1);
++	}
++#if 1
 +
 +	printf("configure SP1\n");
 +	espi_iowr8(SIO_IDX, 7);
@@ -973,7 +1236,7 @@ index 0000000000..68ca6104f4
 +	// enable LDN
 +	espi_iowr8(SIO_IDX, 0x30);
 +	espi_iowr8(SIO_DATA, 1);
-+
++#endif
 +#if 0
 +	// configure sp2
 +	espi_iowr8(0x4e, 7);
@@ -996,7 +1259,7 @@ index 0000000000..68ca6104f4
 +
 +static int do_espi_command(struct cmd_tbl *cmdtp, int flag, int argc, char * const argv[])
 +{
-+	u32 addr, index, data, count;
++	u32 addr, index, data, count, space;
 +	u8 resp[MAX_RESP_LEN];
 +	int rc = 0;
 +
@@ -1058,7 +1321,19 @@ index 0000000000..68ca6104f4
 +		debug = true;
 +		espi_put_iord(addr, count, resp);
 +		debug = false;
-+	} else {
++	} else if (!strcmp(argv[1], "flash_read")) {
++		if (argc < 5)
++			return CMD_RET_USAGE;
++
++		addr = hextoul(argv[2], NULL);
++		count = hextoul(argv[3], NULL);
++		space = hextoul(argv[4], NULL);
++		if (count < 1)
++			return CMD_RET_USAGE;
++		debug = true;
++		espi_flash_read(addr, count, space);
++		debug = false;
++	}else {
 +		rc = CMD_RET_USAGE;
 +	}
 +
@@ -1233,6 +1508,49 @@ index 0000000000..68ca6104f4
 +	return 0;
 +}
 +
++do_espi_uart_command(struct cmd_tbl *cmdtp, int flag, int argc, char * const argv[])
++{
++	int i;
++	u8 resp[MAX_RESP_LEN];
++	u8 data;
++	char *nuvoton ;
++	if (strcmp(argv[1], "auto") == 0) {
++
++		nuvoton = "Nuvoton Technology Corporation (Nuvoton) was founded to bring innovative semiconductor solutions to the market. Nuvoton was spun-off as a Winbond Electronics affiliate in July 2008 and went public in September 2010 on the Taiwan Stock Exchange (TWSE).Nuvoton focuses on the developments of microcontroller/audio, cloud security, battery monitoring, component, visual sensing and IoT with security ICs and has strong market share in Industrial, Automotive, Communication, Consumer and Computer markets. Nuvoton owns 6-inch wafer fabs equipped with diversified processing technologies to provide professional wafer foundry services. Nuvoton provides products with a high performance/cost ratio for its customers by leveraging flexible technology, advanced design capability, and integration of digital and analog technologies. Nuvoton values long term relationships with its partners and customers and is dedicated to continuous innovation of its products, processes, and services. Nuvoton has established subsidiaries in the USA, China, Israel, India, Singapore, Korea, Japan and Germany to strengthen regional customer support and global management. For more information, please visit http://www.nuvoton.com \n";
++
++
++		for ( i = 0; i < strlen(nuvoton); i++) {
++			sprintf(&data, "%c", nuvoton[i]);
++			espi_put_iowr(0x3f8, &data, 1, resp);
++			udelay(100);
++		}
++		return 0;
++	}
++
++	if (strcmp(argv[1], "manual") == 0) {
++		char *endp;
++		ulong addr;
++		ulong len;
++
++		addr = hextoul(argv[2], NULL);
++		len = hextoul(argv[3], NULL);
++
++		nuvoton = (char *)addr;
++
++		for ( i = 0; i < len; i++) {
++			sprintf(&data, "%c", nuvoton[i]);
++			espi_put_iowr(0x3f8, &data, 1, resp);
++			udelay(100);
++		}
++
++
++		return 0;
++	}
++
++	return 0;
++
++}
++
 +U_BOOT_CMD(
 +	espi ,	5,	1,	do_espi_command,
 +	"espi master command",
@@ -1257,6 +1575,10 @@ index 0000000000..68ca6104f4
 +	" iord - put_iord_short.\n"
 +	"  	<argument1> - address\n"
 +	"  	<argument2> - data len (bytes)\n"
++	" flash_read - flash_read.\n"
++	"  	<argument1> - flash offset\n"
++	"  	<argument2> - data len (bytes)\n"
++	"  	<argument3> - address\n"
 +);
 +
 +U_BOOT_CMD(
@@ -1268,6 +1590,16 @@ index 0000000000..68ca6104f4
 +	"     info - show bmc info\n"
 +	" sdr - show sensor reading\n"
 +);
++
++U_BOOT_CMD(
++	espi_uart ,	4,	1,	do_espi_uart_command,
++	"host uart demo",
++	"<command> [<argument1>] [<argument2>]\n"
++	" auto - send default pattern\n"
++	" manual\n"
++	"  	<argument1> - address\n"
++	"  	<argument2> - data len (bytes)\n"
++);
 -- 
-2.34.1
+2.43.0
 
