@@ -11,7 +11,6 @@ SRC_URI:append = " file://0502-mctpd-Add-AssignEndpointStatic-dbus-interface.pat
 SRC_URI:append = " file://0503-Add-method-for-setting-up-MCTP-EID-by-config-path.patch"
 SRC_URI:append = " file://0504-mctpd-fix-mctpd-crash-issue.patch"
 SRC_URI:append = " file://0505-mctpd-supprot-usb-binding.patch"
-SRC_URI:append = " file://0506-mctpd-discover-remote-eid.patch"
 
 SYSTEMD_SERVICE:${PN}:append = " mctpd.service"
 
@@ -26,14 +25,14 @@ do_install:append () {
         install -m 0644 ${WORKDIR}/mctpd.service \
                 ${D}${systemd_system_unitdir}/mctpd.service
 
-        #install -m 0644 ${WORKDIR}/setup-local-eid.conf \
-        #        ${override_dir}/setup-local-eid.conf
+        install -m 0644 ${WORKDIR}/setup-local-eid.conf \
+                ${override_dir}/setup-local-eid.conf
 
         install -d ${D}${libexecdir}/mctp
 
-        #install -m 0755 ${WORKDIR}/mctp-config \
-        #        ${D}${libexecdir}/mctp/
+        install -m 0755 ${WORKDIR}/mctp-config \
+                ${D}${libexecdir}/mctp/
 
-        #install -d ${D}${sysconfdir}/udev/rules.d
-        #install -m 0644 ${WORKDIR}/90-mctp-usb0-network.rules ${D}${sysconfdir}/udev/rules.d/90-mctp-usb0-network.rules
+        install -d ${D}${sysconfdir}/udev/rules.d
+        install -m 0644 ${WORKDIR}/90-mctp-usb0-network.rules ${D}${sysconfdir}/udev/rules.d/90-mctp-usb0-network.rules
 }
