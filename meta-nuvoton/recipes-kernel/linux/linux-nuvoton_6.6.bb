@@ -19,3 +19,5 @@ SRC_URI:append:nuvoton:df-obmc-static-norootfs = " file://enable-spinor-ubifs.cf
 SRC_URI:append:nuvoton = " file://0001-mctp-avoid-confusion-over-local-peer-dest-source-add.patch"
 SRC_URI:append:nuvoton = " file://0002-mctp-make-key-lookups-match-the-ANY-address-on-eithe.patch"
 SRC_URI:append:nuvoton = " file://0003-mctp-serial-use-netif_receive_skb-instead-of-netif_r.patch"
+
+SRC_URI:append:nuvoton = " file://0001-driver-spi-espi-flash-mtd.patch"

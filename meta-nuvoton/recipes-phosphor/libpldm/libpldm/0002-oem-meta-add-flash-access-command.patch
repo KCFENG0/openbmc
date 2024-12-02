@@ -1,0 +1,156 @@
+From f635a18e6de23a754e59c053d97e7881055dd6c6 Mon Sep 17 00:00:00 2001
+From: Ban Feng <kcfeng0@nuvoton.com>
+Date: Mon, 2 Dec 2024 10:27:30 +0800
+Subject: [PATCH] oem: meta: add flash access command
+
+Signed-off-by: Ban Feng <kcfeng0@nuvoton.com>
+---
+ include/libpldm/oem/meta/file_io.h | 55 ++++++++++++++++++++++++++++++
+ src/oem/meta/file_io.c             | 45 ++++++++++++++++++++++++
+ 2 files changed, 100 insertions(+)
+
+diff --git a/include/libpldm/oem/meta/file_io.h b/include/libpldm/oem/meta/file_io.h
+index 32a7109c..251b2d97 100644
+--- a/include/libpldm/oem/meta/file_io.h
++++ b/include/libpldm/oem/meta/file_io.h
+@@ -13,17 +13,56 @@ struct pldm_msg;
+ /** @brief PLDM Commands in OEM META type
+  */
+ 
++/** @struct pldm_flash_access_msg
++ *
++ * Structure representing PLDM Flash Access message
++ */
++struct pldm_flash_access_msg {
++	uint8_t ctype;
++	uint8_t tagLenH;
++	uint8_t lenL;
++	uint32_t addr;
++	uint8_t payload[1]; //!< &payload[0] is the beginning of the payload
++} __attribute__((packed));
++
+ enum pldm_oem_meta_fileio_commands {
+ 	PLDM_OEM_META_FILEIO_CMD_WRITE_FILE = 0x2,
+ 	PLDM_OEM_META_FILEIO_CMD_READ_FILE = 0x3,
+ };
+ 
++enum pldm_oem_meta_flash_access_commands {
++	PLDM_OEM_META_CYC_READ = 0x0,
++	PLDM_OEM_META_CYC_WRITE = 0x1,
++	PLDM_OEM_META_CYC_ERASE = 0x2,
++	PLDM_OEM_META_CYC_SCS_CMP_WITHOUT_DATA = 0x6,
++	PLDM_OEM_META_CYC_UNSCS_CMP_WITHOUT_DATA = 0xe,
++	PLDM_OEM_META_CYC_SCS_CMP_WITH_DATA = 0xf,
++};
++
++enum pldm_oem_meta_flash_erase {
++	PLDM_OEM_META_FLASH_ERASE_4K = 0x0,
++	PLDM_OEM_META_FLASH_ERASE_32K = 0x1,
++	PLDM_OEM_META_FLASH_ERASE_64K = 0x2,
++};
++
++#define PLDM_WRITE_FILE_RESP_BYTES 5
++#define PLDM_WRITE_FILE_MAX_TANSFER_SIZE 200
++
+ struct pldm_oem_meta_write_file_req {
+ 	uint8_t file_handle;
+ 	uint32_t length;
+ 	uint8_t file_data[1];
+ };
+ 
++struct pldm_oem_meta_write_file_resp {
++	uint8_t completion_code;
++	uint8_t pkgLen;
++	uint8_t ctype;
++	uint8_t tagLenH;
++	uint8_t lenL;
++	uint8_t data[1];
++} __attribute__((packed));
++
+ /** @brief Decode OEM meta file io req
+  *
+  *  @param[in] msg - Pointer to PLDM request message
+@@ -37,6 +76,22 @@ int decode_oem_meta_file_io_req(const struct pldm_msg *msg,
+ 				size_t payload_length, uint8_t *file_handle,
+ 				uint32_t *length, uint8_t *data);
+ 
++/** @brief Encode OEM meta file io resp
++ *
++ *  @param[in] instance_id - Message's instance id
++ *  @param[in] completion_code - PLDM completion code
++ *  @param[in] ctype - SAF CMD
++ *  @param[in] tag - tag override
++ *  @param[in] respLen - Total size of data
++ *  @param[in,out] msg - Message will be written to this
++ *  @return pldm_completion_codes
++ *  @note Caller is responsible for memory alloc and dealloc of param 'msg'
++ *  @note File content has to be copied directly by the caller.
++ */
++int encode_oem_meta_file_io_resp(uint8_t instance_id, uint8_t completion_code,
++                                 uint8_t ctype, uint8_t tag, uint16_t respLen,
++                                 struct pldm_msg *msg);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/oem/meta/file_io.c b/src/oem/meta/file_io.c
+index 073c4460..7e9329b6 100644
+--- a/src/oem/meta/file_io.c
++++ b/src/oem/meta/file_io.c
+@@ -1,4 +1,5 @@
+ /* SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later */
++#include <libpldm/base.h>
+ #include <libpldm/oem/meta/file_io.h>
+ #include <endian.h>
+ #include <string.h>
+@@ -32,3 +33,47 @@ int decode_oem_meta_file_io_req(const struct pldm_msg *msg,
+ 
+ 	return pldm_msgbuf_destroy_consumed(buf);
+ }
++
++LIBPLDM_ABI_STABLE
++int encode_oem_meta_file_io_resp(uint8_t instance_id, uint8_t completion_code,
++				 uint8_t ctype, uint8_t tag, uint16_t respLen,
++				 struct pldm_msg *msg)
++{
++	if (msg == NULL) {
++		return PLDM_ERROR_INVALID_DATA;
++	}
++	if (ctype != PLDM_OEM_META_CYC_READ &&
++	    ctype != PLDM_OEM_META_CYC_WRITE &&
++	    ctype != PLDM_OEM_META_CYC_ERASE) {
++		return PLDM_ERROR_INVALID_DATA;
++	}
++
++	struct pldm_header_info header = { 0 };
++	header.msg_type = PLDM_RESPONSE;
++	header.instance = instance_id;
++	header.pldm_type = PLDM_OEM;
++	header.command = PLDM_OEM_META_FILEIO_CMD_WRITE_FILE;
++	uint8_t rc = pack_pldm_header(&header, &(msg->hdr));
++	if (rc != PLDM_SUCCESS) {
++		return rc;
++	}
++
++	struct pldm_oem_meta_write_file_resp *response =
++		(struct pldm_oem_meta_write_file_resp *)msg->payload;
++	response->completion_code = completion_code;
++	if (response->completion_code == PLDM_SUCCESS) {
++		if (ctype == PLDM_OEM_META_CYC_READ) {
++			response->pkgLen = 3 + respLen;
++			response->ctype = PLDM_OEM_META_CYC_SCS_CMP_WITH_DATA;
++		}
++		else if (ctype == PLDM_OEM_META_CYC_WRITE ||
++			 ctype == PLDM_OEM_META_CYC_ERASE) {
++			response->pkgLen = 3;
++			response->ctype = PLDM_OEM_META_CYC_SCS_CMP_WITHOUT_DATA;
++		}
++		response->tagLenH = (tag << 4) | (respLen >> 8);
++		response->lenL = respLen & 0x00FF;
++	}
++
++	return PLDM_SUCCESS;
++}
+-- 
+2.34.1
+

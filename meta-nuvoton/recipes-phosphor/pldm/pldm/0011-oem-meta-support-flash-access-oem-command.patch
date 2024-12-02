@@ -1,0 +1,377 @@
+From e2a1c3cf46a0b018b81253f73f526b1b5f75aa12 Mon Sep 17 00:00:00 2001
+From: Ban Feng <kcfeng0@nuvoton.com>
+Date: Mon, 2 Dec 2024 10:51:42 +0800
+Subject: [PATCH] oem: meta: support flash access oem command
+
+Signed-off-by: Ban Feng <kcfeng0@nuvoton.com>
+---
+ libpldmresponder/meson.build                  |  1 +
+ .../libpldmresponder/oem_meta_file_io.cpp     | 52 +++++++++-
+ .../oem_meta_file_io_by_type.hpp              |  8 +-
+ .../oem_meta_file_io_type_flash_access.cpp    | 96 +++++++++++++++++++
+ .../oem_meta_file_io_type_flash_access.hpp    | 67 +++++++++++++
+ .../oem_meta_file_io_type_post_code.hpp       | 10 ++
+ .../oem_meta_file_io_type_vw_gpio.hpp         | 10 ++
+ 7 files changed, 239 insertions(+), 5 deletions(-)
+ create mode 100644 oem/meta/libpldmresponder/oem_meta_file_io_type_flash_access.cpp
+ create mode 100644 oem/meta/libpldmresponder/oem_meta_file_io_type_flash_access.hpp
+
+diff --git a/libpldmresponder/meson.build b/libpldmresponder/meson.build
+index 7f44a5abc..d7a7847f9 100644
+--- a/libpldmresponder/meson.build
++++ b/libpldmresponder/meson.build
+@@ -68,6 +68,7 @@ if get_option('oem-meta').allowed()
+         '../oem/meta/libpldmresponder/oem_meta_file_io.cpp',
+         '../oem/meta/libpldmresponder/oem_meta_file_io_type_post_code.cpp',
+         '../oem/meta/libpldmresponder/oem_meta_file_io_type_vw_gpio.cpp',
++        '../oem/meta/libpldmresponder/oem_meta_file_io_type_flash_access.cpp',
+     ]
+ endif
+ 
+diff --git a/oem/meta/libpldmresponder/oem_meta_file_io.cpp b/oem/meta/libpldmresponder/oem_meta_file_io.cpp
+index e090fcd28..36f098457 100644
+--- a/oem/meta/libpldmresponder/oem_meta_file_io.cpp
++++ b/oem/meta/libpldmresponder/oem_meta_file_io.cpp
+@@ -2,12 +2,17 @@
+ 
+ #include "oem_meta_file_io_type_post_code.hpp"
+ #include "oem_meta_file_io_type_vw_gpio.hpp"
++#include "oem_meta_file_io_type_flash_access.hpp"
+ #include "xyz/openbmc_project/Common/error.hpp"
+ 
+ #include <libpldm/oem/meta/ipmi_bridge.h>
+-#include <libpldm/oem/meta/file_io.h>
+ 
+ #include <filesystem>
++
++#include <phosphor-logging/lg2.hpp>
++
++PHOSPHOR_LOG2_USING;
++
+ namespace pldm::responder::oem_meta
+ {
+ 
+@@ -27,6 +32,9 @@ std::unique_ptr<FileHandler>
+         case VW_GPIO:
+             return std::make_unique<vwGpioHandler>(
+                 messageTid, configurationDescovery->getConfigurations());
++        case FLASH_ACCESS:
++            return std::make_unique<FlashAccessHandler>(
++                messageTid, configurationDescovery->getConfigurations());
+         default:
+             error("Get invalid file io type, FILEIOTYPE={FILEIOTYPE}",
+                   "FILEIOTYPE", fileIOType);
+@@ -38,8 +46,9 @@ std::unique_ptr<FileHandler>
+ Response FileIOHandler::writeFileIO(pldm_tid_t tid, const pldm_msg* request,
+                                     size_t payloadLength)
+ {
+-    uint8_t fileIOType;
+-    uint32_t length;
++    uint8_t fileIOType, ctype, tag;
++    uint16_t respLen;
++    uint32_t length, addr;
+ 
+     std::array<uint8_t, decodeDataMaxLength> retDataField{};
+ 
+@@ -60,7 +69,42 @@ Response FileIOHandler::writeFileIO(pldm_tid_t tid, const pldm_msg* request,
+ 
+     auto data = std::span(std::begin(retDataField), length);
+ 
+-    rc = handler->write(data);
++    if (fileIOType != FLASH_ACCESS) {
++        rc = handler->write(data);
++    } else {
++        ctype = data[0];
++        tag = (data[1] & 0xF0) >> 4;
++        respLen = ((data[1] & 0x0F) << 8) | data[2];
++        addr = (data[3] << 24) | (data[4] << 16) | (data[5] << 8) | data[6];
++        //error("ctype: {CTYPE}, tag: {TAG}, respLen: {RESPLEN}, addr: {ADDR}",
++        //      "CTYPE", ctype, "TAG", tag, "RESPLEN", respLen, "ADDR", addr);
++
++        Response response(sizeof(pldm_msg_hdr) + PLDM_WRITE_FILE_RESP_BYTES);
++        auto responsePtr = reinterpret_cast<pldm_msg*>(response.data());
++        //error("responseLen: {RESPONSELEN}", "RESPONSELEN", response.size());
++
++        auto data_w = reinterpret_cast<const pldm_flash_access_msg*>(request->payload + PLDM_WRITE_FILE_RESP_BYTES);
++        //error("ctype: {CTYPE}, tag: {TAG}, len: {LEN}", "CTYPE", data_w->ctype, "TAG", data_w->tagLenH, "LEN", data_w->lenL);
++
++        if (respLen == 0)
++            rc = handler->write_response(data, data_w, response, ctype, /*tag, */PLDM_WRITE_FILE_MAX_TANSFER_SIZE, addr);
++        else
++            rc = handler->write_response(data, data_w, response, ctype, /*tag, */respLen, addr);
++
++        /*for (int i=0; i<(int)response.size(); i++) {
++            error("mod response: {RESPONSE}", "RESPONSE", lg2::hex, response[i]);
++        }*/
++        responsePtr = reinterpret_cast<pldm_msg*>(response.data());
++        rc = encode_oem_meta_file_io_resp(request->hdr.instance_id, rc, ctype,
++                                          tag, respLen, responsePtr);
++        if (rc)
++            return ccOnlyResponse(request, rc);
++
++        /*for (int i=0; i<(int)response.size(); i++) {
++            error("encod response: {RESPONSE}", "RESPONSE", lg2::hex, response[i]);
++        }*/
++        return response;
++    }
+ 
+     return ccOnlyResponse(request, rc);
+ }
+diff --git a/oem/meta/libpldmresponder/oem_meta_file_io_by_type.hpp b/oem/meta/libpldmresponder/oem_meta_file_io_by_type.hpp
+index 3a7e3472b..349440761 100644
+--- a/oem/meta/libpldmresponder/oem_meta_file_io_by_type.hpp
++++ b/oem/meta/libpldmresponder/oem_meta_file_io_by_type.hpp
+@@ -2,6 +2,8 @@
+ #include <cstdint>
+ #include <vector>
+ 
++#include <libpldm/oem/meta/file_io.h>
++
+ namespace pldm::responder::oem_meta
+ {
+ /**
+@@ -12,19 +14,23 @@ namespace pldm::responder::oem_meta
+ 
+ using message = std::span<uint8_t>;
+ using configDbusPath = std::string;
+-constexpr auto decodeDataMaxLength = 32;
++//constexpr auto decodeDataMaxLength = 32;
++constexpr auto decodeDataMaxLength = 4112;
+ constexpr auto ipmiDataMaxLength = 1024;
+ 
+ enum pldm_oem_meta_file_io_type : uint8_t
+ {
+     POST_CODE = 0x00,
+     VW_GPIO = 0x06,
++    FLASH_ACCESS = 0x07,
+ };
+ 
+ class FileHandler
+ {
+   public:
+     virtual int write(const message& data) = 0;
++    virtual int write_response(const message& data, const pldm_flash_access_msg* buffer, Response& response,
++        uint8_t command, /*uint8_t tag, */uint16_t respLen, uint32_t addr) = 0;
+     virtual int read(const message& data) = 0;
+     virtual ~FileHandler() {}
+ };
+diff --git a/oem/meta/libpldmresponder/oem_meta_file_io_type_flash_access.cpp b/oem/meta/libpldmresponder/oem_meta_file_io_type_flash_access.cpp
+new file mode 100644
+index 000000000..4be96823a
+--- /dev/null
++++ b/oem/meta/libpldmresponder/oem_meta_file_io_type_flash_access.cpp
+@@ -0,0 +1,96 @@
++#include "oem_meta_file_io_type_flash_access.hpp"
++
++#include <phosphor-logging/lg2.hpp>
++
++#include <utility>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <errno.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/ioctl.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <mtd/mtd-user.h>
++
++PHOSPHOR_LOG2_USING;
++namespace pldm::responder::oem_meta
++{
++
++int FlashAccessHandler::write_response(const message& flashAccessList, const pldm_flash_access_msg* buffer,
++    Response& response, uint8_t ctype, /*uint8_t tag, */uint16_t respLen, uint32_t addr)
++{
++    int open_flag, fd, err;
++    int size = respLen * sizeof(uint8_t);
++
++    //error("flashAccessList size: {FASIZE}", "FASIZE", flashAccessList.size());
++    if (flashAccessList.size() < 7) {
++        error("INVALID DATA LENGTH");
++        return PLDM_ERROR;
++    }
++
++    open_flag = (ctype == PLDM_OEM_META_CYC_READ) ? O_RDONLY : O_RDWR;
++    // FIXME: hardcode npcm-espi-flash for bios flash
++    if ((fd = open("/dev/mtd/by-name/npcm-espi-flash", O_SYNC | open_flag)) < 0) {
++        error("OPEN /dev/mtd/by-name/npcm-espi-flash FAILURE");
++        return PLDM_ERROR;
++    }
++
++    if (addr != lseek(fd, addr, SEEK_SET)) {
++        error("lseek FAILURE");
++        return PLDM_ERROR;
++    }
++
++    if (ctype == PLDM_OEM_META_CYC_READ) {
++        size_t currSize = response.size();
++        response.resize(currSize + respLen);
++        auto filePos = reinterpret_cast<char*>(response.data());
++        filePos += currSize;
++
++        err = ::read(fd, filePos, size);
++        if (err < 0) {
++            error("read failure, errno: {ERRNO}", "ERRNO", err);
++            return PLDM_ERROR;
++        }
++
++        /*for (int i=0; i<size; i++) {
++            error("i: {I}, data: {BUFDATA}", "I", i, "BUFDATA", lg2::hex, filePos[i]);
++        }*/
++    } else if (ctype == PLDM_OEM_META_CYC_WRITE) {
++        /*for (int i=0; i<size; i++) {
++            error("i: {I}, data: {BUFDATA}", "I", i, "BUFDATA", lg2::hex, buffer->payload[i]);
++        }*/
++
++        err = ::write(fd, reinterpret_cast<const char*>(buffer->payload), size);
++        if (err < 0) {
++            error("write failure, errno: {ERRNO}", "ERRNO", err);
++            return PLDM_ERROR;
++        }
++    } else if (ctype == PLDM_OEM_META_CYC_ERASE) {
++        struct erase_info_user erase;
++        erase.start = addr;
++        erase.length = 0x1000; // default 4K erase
++	if (respLen == PLDM_OEM_META_FLASH_ERASE_64K)
++            erase.length = 0x10000;
++        //error("erase start: {START}, length: {ERASELEN}", "START", erase.start, "ERASELEN", erase.length);
++        err = ioctl(fd, MEMERASE, &erase);
++        if (err < 0) {
++            error("erase failure, errno: {ERRNO}", "ERRNO", err);
++            return PLDM_ERROR;
++        }
++    } else {
++        error("INVALID CTYPE");
++        return PLDM_ERROR;
++    }
++
++    if (close(fd) < 0) {
++        error("close FAILURE");
++        return PLDM_ERROR;
++    }
++
++    return PLDM_SUCCESS;
++}
++
++} // namespace pldm::responder::oem_meta
+diff --git a/oem/meta/libpldmresponder/oem_meta_file_io_type_flash_access.hpp b/oem/meta/libpldmresponder/oem_meta_file_io_type_flash_access.hpp
+new file mode 100644
+index 000000000..561beea13
+--- /dev/null
++++ b/oem/meta/libpldmresponder/oem_meta_file_io_type_flash_access.hpp
+@@ -0,0 +1,67 @@
++#pragma once
++
++#include "common/utils.hpp"
++#include "oem_meta_file_io_by_type.hpp"
++#include "requester/configuration_discovery_handler.hpp"
++
++namespace pldm::responder::oem_meta
++{
++/** @class FlashAccessHandler
++ *
++ *  @brief Inherits and implements FileHandler. This class is used
++ *  to store incoming data
++ */
++class FlashAccessHandler : public FileHandler
++{
++  public:
++    FlashAccessHandler(pldm_tid_t tid,
++                       const std::map<std::string, MctpEndpoint>& configurations) :
++        tid(tid), configurations(configurations)
++    {}
++
++    ~FlashAccessHandler() = default;
++
++    /** @brief Method to handle flash access data
++     *  @param[in]
++     *  @return  PLDM status code
++     */
++    int write(const message&)
++    {
++        return PLDM_ERROR_UNSUPPORTED_PLDM_CMD;
++    }
++
++    /** @brief Method to handle flash access data
++     *  @param[in] data - request data
++     *  @param[in] buffer - flash access data
++     *  @param[in] response - PLDM response
++     *  @param[in] ctype - SAF CMD
++     *  @param[in] respLen - Total size of data
++     *  @param[in] addr - flash address
++     *  @return  PLDM status code
++     */
++    int write_response(const message& data, const pldm_flash_access_msg* buffer, Response& response, uint8_t ctype,
++                       /*uint8_t tag, */uint16_t respLen, uint32_t addr);
++
++    /** @brief Method to read flash access data
++     *  @param[in]
++     *  @return  PLDM status code
++     */
++    int read(const message&)
++    {
++        return PLDM_ERROR_UNSUPPORTED_PLDM_CMD;
++    }
++
++  private:
++    /** @brief Parse object path to get correspond slot number
++     *  @param[in] slot - slot number
++     */
++    void parseObjectPathToGetSlot(uint64_t& slot);
++
++    /** @brief The terminus ID of the message source*/
++    pldm_tid_t tid = 0;
++
++    /** @brief Get existing configurations with MctpEndpoint*/
++    const std::map<configDbusPath, MctpEndpoint>& configurations;
++};
++
++} // namespace pldm::responder::oem_meta
+diff --git a/oem/meta/libpldmresponder/oem_meta_file_io_type_post_code.hpp b/oem/meta/libpldmresponder/oem_meta_file_io_type_post_code.hpp
+index f06cc389c..55114ec76 100644
+--- a/oem/meta/libpldmresponder/oem_meta_file_io_type_post_code.hpp
++++ b/oem/meta/libpldmresponder/oem_meta_file_io_type_post_code.hpp
+@@ -27,6 +27,16 @@ class PostCodeHandler : public FileHandler
+      */
+     int write(const message& data);
+ 
++    /** @brief Method to store postcode list
++     *  @param[in]
++     *  @return  PLDM status code
++     */
++    int write_response(const message&, const pldm_flash_access_msg*, Response&, uint8_t,
++                          /*uint8_t, */uint16_t, uint32_t)
++    {
++        return PLDM_ERROR_UNSUPPORTED_PLDM_CMD;
++    }
++
+     /** @brief Method to read postcode list
+      *  @param[in] data - post code
+      *  @return  PLDM status code
+diff --git a/oem/meta/libpldmresponder/oem_meta_file_io_type_vw_gpio.hpp b/oem/meta/libpldmresponder/oem_meta_file_io_type_vw_gpio.hpp
+index 9a36d585d..07ecbe51d 100644
+--- a/oem/meta/libpldmresponder/oem_meta_file_io_type_vw_gpio.hpp
++++ b/oem/meta/libpldmresponder/oem_meta_file_io_type_vw_gpio.hpp
+@@ -27,6 +27,16 @@ class vwGpioHandler : public FileHandler
+      */
+     int write(const message& data);
+ 
++    /** @brief Method to store postcode list
++     *  @param[in]
++     *  @return  PLDM status code
++     */
++    int write_response(const message&, const pldm_flash_access_msg*, Response&, uint8_t,
++                          /*uint8_t, */uint16_t, uint32_t)
++    {
++        return PLDM_ERROR_UNSUPPORTED_PLDM_CMD;
++    }
++
+     /** @brief Method to read postcode list
+      *  @param[in] data - post code
+      *  @return  PLDM status code
+-- 
+2.34.1
+

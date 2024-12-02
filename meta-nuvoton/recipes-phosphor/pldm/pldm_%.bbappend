@@ -13,3 +13,4 @@ SRC_URI:append = " file://0005-Support-OEM-META-write-file-request-for-post-code
 SRC_URI:append = " file://0008-oem-meta-support-ipmi-bridge-oem-command.patch"
 SRC_URI:append = " file://0009-do-not-set-address-is-class-is-USB.patch"
 SRC_URI:append = " file://0010-oem-meta-support-vwgpio-post-completed-event-bridge.patch"
+SRC_URI:append = " file://0011-oem-meta-support-flash-access-oem-command.patch"
