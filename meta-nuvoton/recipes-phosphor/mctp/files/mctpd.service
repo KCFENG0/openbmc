@@ -2,8 +2,8 @@
 Description=MCTP control protocol daemon
 Wants=mctp-local.target
 After=mctp-local.target
-Wants=mapper-wait@-xyz-openbmc_project-inventory-system-board-NPCM400_SMC_EVB-BIC.service
-After=mapper-wait@-xyz-openbmc_project-inventory-system-board-NPCM400_SMC_EVB-BIC.service
+#Wants=mapper-wait@-xyz-openbmc_project-inventory-system-board-NPCM400_SMC_EVB-BIC.service
+#After=mapper-wait@-xyz-openbmc_project-inventory-system-board-NPCM400_SMC_EVB-BIC.service
 
 [Service]
 Type=dbus

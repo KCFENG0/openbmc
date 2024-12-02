@@ -1,2 +1,0 @@
-SUBSYSTEM=="usb", ACTION=="add", ENV{PRODUCT}=="1d6b/104/206", RUN+="/usr/bin/systemctl start mctpd"
-SUBSYSTEM=="usb", ACTION=="remove", ENV{PRODUCT}=="1d6b/104/206", RUN+="/usr/bin/systemctl stop mctpd"
