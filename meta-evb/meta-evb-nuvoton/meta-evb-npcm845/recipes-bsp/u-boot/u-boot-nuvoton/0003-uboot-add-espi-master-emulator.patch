@@ -1,4 +1,4 @@
-From 1850d220357037715082aa502d36e2a38c0892dd Mon Sep 17 00:00:00 2001
+From b7fe494c019acb42c8a49b9d2fc631557d9b9968 Mon Sep 17 00:00:00 2001
 From: Stanley Chu <yschu@nuvoton.com>
 Date: Mon, 9 Sep 2024 11:12:35 +0800
 Subject: [PATCH] uboot: add espi master emulator
@@ -10,15 +10,15 @@ Signed-off-by: Joseph Liu <kwliu@nuvoton.com>
  arch/arm/dts/nuvoton-npcm845-pincfg.dtsi |   45 +
  cmd/Kconfig                              |    5 +
  cmd/Makefile                             |    1 +
- cmd/espi.c                               | 1482 ++++++++++++++++++++++
- 5 files changed, 1537 insertions(+)
+ cmd/espi.c                               | 1527 ++++++++++++++++++++++
+ 5 files changed, 1582 insertions(+)
  create mode 100644 cmd/espi.c
 
 diff --git a/arch/arm/dts/nuvoton-npcm845-evb.dts b/arch/arm/dts/nuvoton-npcm845-evb.dts
-index 3007d04267..5640554df3 100644
+index 3edb320c66..878f3f3eae 100644
 --- a/arch/arm/dts/nuvoton-npcm845-evb.dts
 +++ b/arch/arm/dts/nuvoton-npcm845-evb.dts
-@@ -359,6 +359,10 @@
+@@ -363,6 +363,10 @@
  	status = "okay";
  };
  
@@ -114,10 +114,10 @@ index afb8c5f61c..6a6b0cf9b8 100644
  obj-$(CONFIG_CMD_EXT2) += ext2.o
 diff --git a/cmd/espi.c b/cmd/espi.c
 new file mode 100644
-index 0000000000..82afb762ca
+index 0000000000..fe189b2232
 --- /dev/null
 +++ b/cmd/espi.c
-@@ -0,0 +1,1482 @@
+@@ -0,0 +1,1527 @@
 +#include <stdlib.h>
 +#include <command.h>
 +#include <common.h>
@@ -142,8 +142,11 @@ index 0000000000..82afb762ca
 +#define PORT_BASE	0xF0015000	// GPIO5: 160~191
 +#define PORT_OUT	(PORT_BASE + 0xC)
 +#define PORT_IN		(PORT_BASE + 0x4)
++#define PORT_POL		(PORT_BASE + 0x8)
 +#define PORT_OES	(PORT_BASE + 0x70)
 +#define PORT_IEM	(PORT_BASE + 0x58)
++#define PORT_EVTYP	(PORT_BASE + 0x28)
++#define PORT_EVBE	(PORT_BASE + 0x2C)
 +#define PORT_EVEN	(PORT_BASE + 0x40)
 +#define PORT_EVENS	(PORT_BASE + 0x44)
 +#define PORT_EVENC	(PORT_BASE + 0x48)
@@ -153,7 +156,7 @@ index 0000000000..82afb762ca
 +#define eSPI_IO0	BIT(4) //164
 +#define eSPI_IO1	BIT(5) //165
 +#define eSPI_nRST	BIT(6) //166
-+#define eSPI_ALERT	BIT(8) //168
++//#define eSPI_ALERT	BIT(8) //168
 +
 +// eSPI command
 +#define CMD_SET_CONFIGURATION	0x22
@@ -208,6 +211,8 @@ index 0000000000..82afb762ca
 +#define KCS_CMD_WRITE_END	0x62
 +#define KCS_CMD_READ		0x68
 +
++#define FLASH_R_LENGTH		64
++
 +struct get_flash_c_req {
 +	u8 cmd;
 +	u8 crc;
@@ -218,7 +223,7 @@ index 0000000000..82afb762ca
 +	u8 cycle_type;
 +	u8 tag_len_11_8;
 +	u8 len_7_0;
-+	u8 data[67]; // 64 bytes data + 2 byte status; 1 byte crc
++	u8 data[FLASH_R_LENGTH + 3]; // FLASH_R_LENGTH bytes data + 2 byte status; 1 byte crc
 +} __attribute__((__packed__));
 +
 +struct get_status_req {
@@ -378,11 +383,14 @@ index 0000000000..82afb762ca
 +	// set output enable
 +	writel(eSPI_nCS | eSPI_CLK | eSPI_IO0 | eSPI_nRST, PORT_OES);
 +	// set input enable
-+	writel(eSPI_IO1 | eSPI_ALERT, PORT_IEM);
++	writel(eSPI_IO1, PORT_IEM);
 +
 +	// set event enable
-+	writel(eSPI_ALERT, PORT_EVEN);
-+	writel(eSPI_ALERT, PORT_EVENS);
++	writel(eSPI_IO1, PORT_EVENC);
++	writel(eSPI_IO1, PORT_EVST);
++	writel(eSPI_IO1, PORT_EVENS);
++	writel(eSPI_IO1, PORT_EVTYP);
++	writel(eSPI_IO1, PORT_EVBE);
 +
 +	printf("espi reset\n");
 +	udelay(100);
@@ -561,7 +569,7 @@ index 0000000000..82afb762ca
 +	espi_port_update(eSPI_IO0, eSPI_nCS | eSPI_CLK);
 +	espi_send((u8 *)&req, sizeof(req));
 +	espi_tar();
-+	status = respi_read_response((u8 *)&resp, sizeof(resp) - (64 - len));
++	status = respi_read_response((u8 *)&resp, sizeof(resp) - (FLASH_R_LENGTH - len));
 +	espi_port_set(eSPI_nCS);
 +
 +	debug("resp.code 0x%x\n", resp.code);
@@ -569,10 +577,12 @@ index 0000000000..82afb762ca
 +	debug("resp.status %x\n", resp.data[len] | (resp.data[len + 1] << 8));
 +	debug("resp.crc %x\n", resp.data[len + 2]);
 +
-+	if (resp.cycle_type == 0xf)
++	if (resp.cycle_type == 0xf) {
 +		memcpy(addr, resp.data, len);
-+	else
++	} else {
 +		printf("flash cycle type error\n");
++		return STATUS_ERR;
++	}
 +
 +	if (status) {
 +		printf("espi response error: code=0x%02x, status=0x%04x\n", resp.code, status);
@@ -621,7 +631,7 @@ index 0000000000..82afb762ca
 +	debug("resp.status 0x%x\n", resp.status);
 +
 +	if (status) {
-+		printf("espi response error: code=0x%02x, status=0x%04x\n", resp.code, status);
++		printf("\n  espi_put_flash_np response error: code=0x%02x, status=0x%04x\n", resp.code, status);
 +		return STATUS_ERR;
 +	}
 +
@@ -631,29 +641,51 @@ index 0000000000..82afb762ca
 +static int wait_alert(void)
 +{
 +	u32 val;
-+	int count = 1000;
++	int count = 1000000;
 +
 +	do {
 +		val = readl(PORT_EVST);
-+		if (val & eSPI_ALERT) {
-+			writel(eSPI_ALERT, PORT_EVST);
++		if (val & eSPI_IO1) {
++			writel(eSPI_IO1, PORT_EVST);
 +			debug("eSPI_ALERT\n");
 +			break;
 +		}
 +		if (count-- == 0) {
-+			printf("wait_alert timeout\n");
++			printf("\nwait_alert timeout\n");
 +			return -ETIMEDOUT;
 +		}
-+		udelay(10);
++		udelay(1);
 +	} while (1);
 +
 +	return 0;
 +}
 +
++static int wait_for_flash_c_avail(void)
++{
++	u16 status;
++	int count = 1000000;
++
++	do {
++		status = espi_get_status();
++		if (status & BIT(12)) {
++			debug("FLASH_C_AVAIL  count %d\n", count);
++			return 0;
++		}
++
++		if (count-- == 0) {
++			printf("\nwait_for_flash_c_avail timeout\n");
++			return -ETIMEDOUT;
++		}
++		udelay(100);
++	} while (1);
++
++	return -ETIMEDOUT;
++}
++
 +static int espi_flash_read(u32 addr, int count, u32 dest)
 +{
 +	u16 status;
-+	int i, index = 0, len;
++	int i, index = 0, len, retry = 0;
 +
 +	static ulong time_start;
 +
@@ -662,34 +694,47 @@ index 0000000000..82afb762ca
 +	printf("Load address: 0x%x\n", dest);
 +	puts("Loading: *\b");
 +
-+	index = count /64;
-+	if (count % 64)
++	index = count /FLASH_R_LENGTH;
++	if (count % FLASH_R_LENGTH)
 +		index++;
 +
 +	for (i = 0; i < index; i ++) {
-+		if ((i == index - 1) && (count % 64))
-+			len = count % 64;
++		if ((i == index - 1) && (count % FLASH_R_LENGTH))
++			len = count % FLASH_R_LENGTH;
 +		else
-+			len = 64;
-+
-+		if (espi_put_flash_np(addr + i * 64, len))
++			len = FLASH_R_LENGTH;
++		
++		if (espi_put_flash_np(addr + i * FLASH_R_LENGTH, len))
 +			return STATUS_ERR;
++
++/*
++		while (retry < 3) {
++			if (espi_put_flash_np(addr + i * FLASH_R_LENGTH, len))
++				continue;
++			else
++				break;
++			retry++;
++		}
++		if (retry == 3) {
++			printf("espi_put_flash_np error\n");
++			return STATUS_ERR;
++		}
++
++		retry = 0;
++*/
 +
 +		if (wait_alert())
 +			return STATUS_ERR;
 +
-+		status = espi_get_status();
-+		if (status & BIT(12)) {
-+			debug("FLASH_C_AVAIL\n");
-+			if (espi_get_flash_c(len, dest + i * 64))
-+				return STATUS_ERR;
-+			putc('#');
-+		} else {
-+			printf("FLASH_C_NOT_AVAIL\n");
++		if (wait_for_flash_c_avail())
 +			return STATUS_ERR;
-+		}
 +
-+		if ((i % 64) == 0 && i > 0)
++		if (espi_get_flash_c(len, dest + i * FLASH_R_LENGTH))
++			return STATUS_ERR;
++
++		putc('#');
++
++		if ((i % FLASH_R_LENGTH) == 0 && i > 0)
 +			puts("\n\t ");
 +	}
 +
