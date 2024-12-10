@@ -1,4 +1,4 @@
-From b7fe494c019acb42c8a49b9d2fc631557d9b9968 Mon Sep 17 00:00:00 2001
+From 0ae6399847a0245d3b97cf776fc03757f5996cd9 Mon Sep 17 00:00:00 2001
 From: Stanley Chu <yschu@nuvoton.com>
 Date: Mon, 9 Sep 2024 11:12:35 +0800
 Subject: [PATCH] uboot: add espi master emulator
@@ -10,15 +10,15 @@ Signed-off-by: Joseph Liu <kwliu@nuvoton.com>
  arch/arm/dts/nuvoton-npcm845-pincfg.dtsi |   45 +
  cmd/Kconfig                              |    5 +
  cmd/Makefile                             |    1 +
- cmd/espi.c                               | 1527 ++++++++++++++++++++++
- 5 files changed, 1582 insertions(+)
+ cmd/espi.c                               | 1531 ++++++++++++++++++++++
+ 5 files changed, 1586 insertions(+)
  create mode 100644 cmd/espi.c
 
 diff --git a/arch/arm/dts/nuvoton-npcm845-evb.dts b/arch/arm/dts/nuvoton-npcm845-evb.dts
-index 3edb320c66..878f3f3eae 100644
+index 3007d04267..5640554df3 100644
 --- a/arch/arm/dts/nuvoton-npcm845-evb.dts
 +++ b/arch/arm/dts/nuvoton-npcm845-evb.dts
-@@ -363,6 +363,10 @@
+@@ -359,6 +359,10 @@
  	status = "okay";
  };
  
@@ -114,10 +114,10 @@ index afb8c5f61c..6a6b0cf9b8 100644
  obj-$(CONFIG_CMD_EXT2) += ext2.o
 diff --git a/cmd/espi.c b/cmd/espi.c
 new file mode 100644
-index 0000000000..fe189b2232
+index 0000000000..e0ff9b1522
 --- /dev/null
 +++ b/cmd/espi.c
-@@ -0,0 +1,1527 @@
+@@ -0,0 +1,1531 @@
 +#include <stdlib.h>
 +#include <command.h>
 +#include <common.h>
@@ -736,6 +736,8 @@ index 0000000000..fe189b2232
 +
 +		if ((i % FLASH_R_LENGTH) == 0 && i > 0)
 +			puts("\n\t ");
++
++		udelay(20);
 +	}
 +
 +
@@ -1586,6 +1588,8 @@ index 0000000000..fe189b2232
 +			sprintf(&data, "%c", nuvoton[i]);
 +			espi_put_iowr(0x3f8, &data, 1, resp);
 +			udelay(100);
++			if (ctrlc())
++				break;
 +		}
 +
 +
