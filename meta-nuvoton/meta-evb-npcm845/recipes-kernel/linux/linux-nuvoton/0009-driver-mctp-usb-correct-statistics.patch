@@ -1,0 +1,62 @@
+From 01dadd8410c79d4471ce22a7d88a848edc0dbe28 Mon Sep 17 00:00:00 2001
+From: Joseph Liu <kwliu@nuvoton.com>
+Date: Tue, 17 Dec 2024 14:11:53 +0800
+Subject: [PATCH] driver: mctp usb: correct statistics
+
+Signed-off-by: Joseph Liu <kwliu@nuvoton.com>
+---
+ drivers/net/mctp/mctp-usb.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/drivers/net/mctp/mctp-usb.c b/drivers/net/mctp/mctp-usb.c
+index cdfe26f0de64..1dd406ab0ebb 100644
+--- a/drivers/net/mctp/mctp-usb.c
++++ b/drivers/net/mctp/mctp-usb.c
+@@ -30,20 +30,26 @@ struct mctp_usb {
+ static void mctp_usb_stat_tx_dropped(struct net_device *dev)
+ {
+ 	struct pcpu_dstats *dstats = this_cpu_ptr(dev->dstats);
++	struct net_device_stats *stats = &dev->stats;
+ 
+ 	u64_stats_update_begin(&dstats->syncp);
+ 	u64_stats_inc((u64_stats_t *)&dstats->tx_drops);
+ 	u64_stats_update_end(&dstats->syncp);
++	stats->tx_dropped++;
+ }
+ 
+ static void mctp_usb_stat_tx_done(struct net_device *dev, unsigned int len)
+ {
+ 	struct pcpu_dstats *dstats = this_cpu_ptr(dev->dstats);
++	struct net_device_stats *stats = &dev->stats;
+ 
+ 	u64_stats_update_begin(&dstats->syncp);
+ 	u64_stats_inc((u64_stats_t *)&dstats->tx_packets);
+ 	u64_stats_add((u64_stats_t *)&dstats->tx_bytes, len);
+ 	u64_stats_update_end(&dstats->syncp);
++	stats->tx_bytes += len;
++	stats->tx_packets++;
++
+ }
+ 
+ static void mctp_usb_out_complete(struct urb *urb)
+@@ -150,6 +156,7 @@ static void mctp_usb_in_complete(struct urb *urb)
+ 	struct sk_buff *skb = urb->context;
+ 	struct net_device *netdev = skb->dev;
+ 	struct pcpu_dstats *dstats = this_cpu_ptr(netdev->dstats);
++	struct net_device_stats *stats = &netdev->stats;
+ 	struct mctp_usb *mctp_usb = netdev_priv(netdev);
+ 	struct mctp_skb_cb *cb;
+ 	unsigned int len;
+@@ -230,6 +237,9 @@ static void mctp_usb_in_complete(struct urb *urb)
+ 		u64_stats_add((u64_stats_t *)&dstats->rx_bytes, skb->len);
+ 		u64_stats_update_end(&dstats->syncp);
+ 
++		stats->rx_packets++;
++		stats->rx_bytes += skb->len;
++
+ 		skb = skb2;
+ 	}
+ 
+-- 
+2.43.0
+
